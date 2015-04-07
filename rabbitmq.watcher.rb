@@ -27,14 +27,28 @@ OptionParser.new do |opts|
   opts.banner = "Usage: #{$0} [options]"
 
   opts.on('-P', '--prefix [STATSD_PREFIX]', "metric prefix (default: #{options[:prefix]})")     { |prefix|   options[:prefix] = "#{prefix}" }
-  opts.on('-i', '--interval [SEC]',"reporting interval (default: #{options[:interval]})")       { |interval| options[:interval] = interval }
+  opts.on('-i', '--interval [SEC]',"reporting interval (default: #{options[:interval]})")       { |interval| options[:interval] = interval.to_i }
   opts.on('-h', '--host [HOST]',   "statsd host (default: #{options[:host]})")                  { |host|     options[:host] = host }
-  opts.on('-p', '--port [PORT]',   "statsd port (default: #{options[:port]})")                  { |port|     options[:port] = port }
+  opts.on('-p', '--port [PORT]',   "statsd port (default: #{options[:port]})")                  { |port|     options[:port] = port.to_i }
   opts.on('-u', '--rmquser [RABBITMQ_USER]',   "rabbitmq user (default: #{options[:rmquser]})") { |rmquser|  options[:rmquser] = rmquser }
   opts.on('-s', '--rmqpass [RABBITMQ_PASS]',   "rabbitmq pass (default: #{options[:rmqpass]})") { |rmqpass|  options[:rmqpass] = rmqpass }
   opts.on('-r', '--rmqhost [RABBITMQ_HOST]',   "rabbitmq host (default: #{options[:rmqhost]})") { |rmqhost|  options[:rmqhost] = rmqhost }
-  opts.on('-b', '--rmqport [RABBITMQ_PORT]',   "rabbitmq port (default: #{options[:rmqport]})") { |rmqport|  options[:rmqport] = rmqport }
+  opts.on('-b', '--rmqport [RABBITMQ_PORT]',   "rabbitmq port (default: #{options[:rmqport]})") { |rmqport|  options[:rmqport] = rmqport.to_i }
   opts.on('-q', '--[no-]queues',   "report queue metrics (default: #{options[:queues]})")       { |queues|   options[:queues] = queues }
+  opts.on('-c', '--config [CONFIG_FILE]',      "optional configuration file ")                  { |config_file|
+    JSON.parse(File.read(config_file)).each do |key, value|
+      key = key.to_sym
+
+      case key
+      when :interval, :port, :rmqport
+        value = value.to_i
+      when :queues
+        value = (value.downcase == "true")
+      end
+
+      options[key] = value
+    end
+  }
 end.parse!
 
 ###############################################################
@@ -137,7 +151,8 @@ unless system 'which rabbitmqadmin'
 end
 
 loop do
-  overview = JSON.parse(`rabbitmqadmin --host #{options[:rmqhost]} --port #{options[:rmqport]} --user #{options[:rmquser]} --password #{options[:rmqpass]} show overview -f raw_json`)
+  flags = "--host #{options[:rmqhost]} --port #{options[:rmqport]} --user #{options[:rmquser]} --password #{options[:rmqpass]}"
+  overview = JSON.parse(`rabbitmqadmin #{flags} show overview -f raw_json`)
   prefix = "#{options[:prefix]}.overview.object_totals"
   Statsd.gauge("#{prefix}.channels", overview[0]['object_totals']['channels'])
   Statsd.gauge("#{prefix}.connections", overview[0]['object_totals']['connections'])
@@ -146,7 +161,7 @@ loop do
   Statsd.gauge("#{prefix}.queues", overview[0]['object_totals']['queues'])
 
   if options[:queues]
-    queues = JSON.parse(`rabbitmqadmin --host #{options[:rmqhost]} --port #{options[:rmqport]} --user #{options[:rmquser]} --password #{options[:rmqpass]} list queues -f raw_json`)
+    queues = JSON.parse(`rabbitmqadmin #{flags} list queues -f raw_json`)
     queues.each do |queue|
       if queue.key?('name')
         prefix = "#{options[:prefix]}.queues.#{queue['name']}"
