@@ -1,14 +1,15 @@
 #!/usr/bin/env ruby
 #
 # Author: Jeff Vier <jeff@jeffvier.com>
+# Revised extensively by Ian Lai
 
 require 'rubygems'
 require 'digest'
 require 'find'
-require 'fileutils'
 require 'json'
 require 'socket'
 require 'resolv'
+require 'net/http'
 
 require 'optparse'
 
@@ -28,14 +29,14 @@ OptionParser.new do |opts|
 
   opts.on('-P', '--prefix [STATSD_PREFIX]', "metric prefix (default: #{options[:prefix]})")     { |prefix|   options[:prefix] = "#{prefix}" }
   opts.on('-i', '--interval [SEC]',"reporting interval (default: #{options[:interval]})")       { |interval| options[:interval] = interval.to_i }
-  opts.on('-h', '--host [HOST]',   "statsd host (default: #{options[:host]})")                  { |host|     options[:host] = host }
-  opts.on('-p', '--port [PORT]',   "statsd port (default: #{options[:port]})")                  { |port|     options[:port] = port.to_i }
+  opts.on('-h', '--host [HOST]',   "carbon host (default: #{options[:host]})")                  { |host|     options[:host] = host }
+  opts.on('-p', '--port [PORT]',   "carbon port (default: #{options[:port]})")                  { |port|     options[:port] = port.to_i }
   opts.on('-u', '--rmquser [RABBITMQ_USER]',   "rabbitmq user (default: #{options[:rmquser]})") { |rmquser|  options[:rmquser] = rmquser }
   opts.on('-s', '--rmqpass [RABBITMQ_PASS]',   "rabbitmq pass (default: #{options[:rmqpass]})") { |rmqpass|  options[:rmqpass] = rmqpass }
   opts.on('-r', '--rmqhost [RABBITMQ_HOST]',   "rabbitmq host (default: #{options[:rmqhost]})") { |rmqhost|  options[:rmqhost] = rmqhost }
   opts.on('-b', '--rmqport [RABBITMQ_PORT]',   "rabbitmq port (default: #{options[:rmqport]})") { |rmqport|  options[:rmqport] = rmqport.to_i }
   opts.on('-q', '--[no-]queues',   "report queue metrics (default: #{options[:queues]})")       { |queues|   options[:queues] = queues }
-  opts.on('-c', '--config [CONFIG_FILE]',      "optional configuration file ")                  { |config_file|
+  opts.on('-c', '--config [CONFIG_FILE]',      "optional configuration file (in JSON format)")  { |config_file|
     JSON.parse(File.read(config_file)).each do |key, value|
       key = key.to_sym
 
@@ -51,136 +52,144 @@ OptionParser.new do |opts|
   }
 end.parse!
 
-###############################################################
-# Typical StatsD class, pasted to avoid an external dependency:
-# Stolen from https://github.com/bvandenbos/statsd-client
+################################################################################
+class Graphite
+  def initialize(host, port)
+    @host = host
+    @port = port
+    @metrics = []
+  end
 
-class Statsd
+  def add(metric, value)
+    @metrics.push [metric, value]
+  end
 
-  Version = '0.0.8'
-
-  class << self
-
-    attr_accessor :host, :port
-
-    def host_ip_addr
-      @host_ip_addr ||= Resolv.getaddress(host)
-    end
-
-    def host=(h)
-      @host_ip_addr = nil
-      @host = h
-    end
-
-    # +stat+ to log timing for
-    # +time+ is the time to log in ms
-    def timing(stat, time = nil, sample_rate = 1)
-      if block_given?
-        start_time = Time.now.to_f
-        yield
-        time = ((Time.now.to_f - start_time) * 1000).floor
+  def send()
+    begin
+      sock = TCPSocket.new(@host, @port)
+      time = Time.now.to_i
+      @metrics.each do |metric, value|
+        line = ""
+        sock.write("#{metric} #{value} #{time}\n")
       end
-      send_stats("#{stat}:#{time}|ms", sample_rate)
-    end
-
-    def gauge(stat, value, sample_rate = 1)
-      send_stats("#{stat}:#{value}|g", sample_rate)
-    end
-
-    # +stats+ can be a string or an array of strings
-    def increment(stats, sample_rate = 1)
-      update_counter stats, 1, sample_rate
-    end
-
-    # +stats+ can be a string or an array of strings
-    def decrement(stats, sample_rate = 1)
-      update_counter stats, -1, sample_rate
-    end
-
-    # +stats+ can be a string or array of strings
-    def update_counter(stats, delta = 1, sample_rate = 1)
-      stats = Array(stats)
-      send_stats(stats.map { |s| "#{s}:#{delta}|c" }, sample_rate)
-    end
-
-    private
-
-    def send_stats(data, sample_rate = 1)
-      data = Array(data)
-      sampled_data = []
-
-      # Apply sample rate if less than one
-      if sample_rate < 1
-        data.each do |d|
-          if rand <= sample_rate
-            sampled_data << "#{d}|@#{sample_rate}"
-          end
-        end
-        data = sampled_data
-      end
-
-      return if data.empty?
-
-      raise "host and port must be set" unless host && port
-
-      begin
-        sock = UDPSocket.new
-        data.each do |d|
-          sock.send(d, 0, host_ip_addr, port)
-        end
-      rescue => e
-        puts "UDPSocket error: #{e}"
-      ensure
-        sock.close
-      end
-      true
+      @metrics = []
+    rescue => e
+      puts "TCPSocket error: #{e}"
+    ensure
+      sock.close if sock
     end
   end
 end
 
 ################################################################################
+class RabbitMqAdmin
+  def initialize(options)
+    @options = options
+  end
 
-include FileUtils # allows use of FileUtils methods without the FileUtils:: prefix ie: mv_f(file, file2) or rm_rf(dir)
-
-STDOUT.sync = true # don't buffer STDOUT
-Statsd.host = options[:host]
-Statsd.port = options[:port]
-
-unless system 'which rabbitmqadmin'
-  raise "unable to locate the rabbitmqadmin command"
+  def get(uri)
+    Net::HTTP.start(@options[:rmqhost], @options[:rmqport]) do |http|
+      req = Net::HTTP::Get.new("/api/#{uri}")
+      req.basic_auth @options[:rmquser], @options[:rmqpass]
+      response = http.request(req)
+      if response.kind_of? Net::HTTPSuccess
+        return JSON.parse(response.body)
+      else
+        raise "Could not connect to RabbitMQ management API: #{response.code} #{response.message}"
+      end
+    end
+  end
 end
 
-loop do
-  flags = "--host #{options[:rmqhost]} --port #{options[:rmqport]} --user #{options[:rmquser]} --password #{options[:rmqpass]}"
-  overview = JSON.parse(`rabbitmqadmin #{flags} show overview -f raw_json`)
-  prefix = "#{options[:prefix]}.overview.object_totals"
-  Statsd.gauge("#{prefix}.channels", overview[0]['object_totals']['channels'])
-  Statsd.gauge("#{prefix}.connections", overview[0]['object_totals']['connections'])
-  Statsd.gauge("#{prefix}.consumers", overview[0]['object_totals']['consumers'])
-  Statsd.gauge("#{prefix}.exchanges", overview[0]['object_totals']['exchanges'])
-  Statsd.gauge("#{prefix}.queues", overview[0]['object_totals']['queues'])
+################################################################################
+class Dumper
+  def initialize(options)
+    @options = options
+    @admin = RabbitMqAdmin.new(options)
+    @graphite = Graphite.new(options[:host], options[:port])
+  end
 
-  if options[:queues]
-    queues = JSON.parse(`rabbitmqadmin #{flags} list queues -f raw_json`)
+  def overview()
+    overview = @admin.get("overview")
+    prefix = "#{@options[:prefix]}.overview.object_totals"
+    totals = overview['object_totals']
+    node = overview['node']
+    @graphite.add("#{prefix}.channels", totals['channels'])
+    @graphite.add("#{prefix}.connections", totals['connections'])
+    @graphite.add("#{prefix}.consumers", totals['consumers'])
+    @graphite.add("#{prefix}.exchanges", totals['exchanges'])
+    @graphite.add("#{prefix}.queues", totals['queues'])
+
+    system(node)
+  end
+
+  def queues()
+    queues = @admin.get("queues")
     queues.each do |queue|
       if queue.key?('name')
-        prefix = "#{options[:prefix]}.queues.#{queue['name']}"
-        Statsd.gauge("#{prefix}.active_consumers", queue['active_consumers'])
-        Statsd.gauge("#{prefix}.consumers", queue['consumers'])
-        Statsd.gauge("#{prefix}.memory", queue['memory'])
-        Statsd.gauge("#{prefix}.messages", queue['messages'])
-        Statsd.gauge("#{prefix}.messages_ready", queue['messages_ready'])
-        Statsd.gauge("#{prefix}.messages_unacknowledged", queue['messages_unacknowledged'])
-        Statsd.gauge("#{prefix}.avg_egress_rate", queue['backing_queue_status']['avg_egress_rate'])   if queue['backing_queue_status']
-        Statsd.gauge("#{prefix}.avg_ingress_rate", queue['backing_queue_status']['avg_ingress_rate']) if queue['backing_queue_status']
+        queue_name = queue['name'].gsub('.', '_')
+        prefix = "#{@options[:prefix]}.queues.#{queue_name}"
+        @graphite.add("#{prefix}.active_consumers", queue['active_consumers'])
+        @graphite.add("#{prefix}.consumers", queue['consumers'])
+        @graphite.add("#{prefix}.memory", queue['memory'])
+        @graphite.add("#{prefix}.messages", queue['messages'])
+        @graphite.add("#{prefix}.messages_ready", queue['messages_ready'])
+        @graphite.add("#{prefix}.messages_unacknowledged", queue['messages_unacknowledged'])
+        @graphite.add("#{prefix}.avg_egress_rate", queue['backing_queue_status']['avg_egress_rate'])   if queue['backing_queue_status']
+        @graphite.add("#{prefix}.avg_ingress_rate", queue['backing_queue_status']['avg_ingress_rate']) if queue['backing_queue_status']
         if queue.key?('message_stats')
-          Statsd.gauge("#{prefix}.ack_rate", queue['message_stats']['ack_details']['rate'])                  if queue['message_stats']['ack_details']
-          Statsd.gauge("#{prefix}.deliver_rate", queue['message_stats']['deliver_details']['rate'])          if queue['message_stats']['deliver_details']
-          Statsd.gauge("#{prefix}.deliver_get_rate", queue['message_stats']['deliver_get_details']['rate'])  if queue['message_stats']['deliver_get_details']
-          Statsd.gauge("#{prefix}.publish_rate", queue['message_stats']['publish_details']['rate'])          if queue['message_stats']['publish_details']
+          @graphite.add("#{prefix}.ack_rate", queue['message_stats']['ack_details']['rate'])                  if queue['message_stats']['ack_details']
+          @graphite.add("#{prefix}.deliver_rate", queue['message_stats']['deliver_details']['rate'])          if queue['message_stats']['deliver_details']
+          @graphite.add("#{prefix}.deliver_get_rate", queue['message_stats']['deliver_get_details']['rate'])  if queue['message_stats']['deliver_get_details']
+          @graphite.add("#{prefix}.publish_rate", queue['message_stats']['publish_details']['rate'])          if queue['message_stats']['publish_details']
         end
       end
     end
+  end
+
+  def send()
+    @graphite.send
+  end
+
+  private
+  def system(node)
+    system = @admin.get("nodes/#{node}")
+    prefix = "#{@options[:prefix]}.system"
+
+    [
+      'disk_free',
+      'disk_free_limit',
+      'fd_total',
+      'fd_used',
+      'mem_used',
+      'mem_limit',
+      'proc_total',
+      'proc_used',
+      'processors',
+      'run_queue',
+      'sockets_total',
+      'sockets_used',
+      'uptime',
+    ].each do |stat|
+      @graphite.add("#{prefix}.#{stat}", system[stat])
+    end
+  end
+end
+
+################################################################################
+STDOUT.sync = true # don't buffer STDOUT
+
+dumper = Dumper.new(options)
+
+loop do
+  begin
+    dumper.overview
+    if options[:queues]
+      dumper.queues
+    end
+    dumper.send
+  rescue
+    puts $!, $@
   end
 
   sleep options[:interval]
