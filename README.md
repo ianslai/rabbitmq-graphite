@@ -10,7 +10,7 @@ Usage
         -P, --prefix [STATSD_PREFIX]     metric prefix (default: ma-lt-ian.ma.runwaynine.com)
         -i, --interval [SEC]             reporting interval (default: 10)
         -h, --host [HOST]                carbon host (default: 127.0.0.1)
-        -p, --port [PORT]                carbon port (default: 8125)
+        -p, --port [PORT]                carbon port (default: 2003)
         -u, --rmquser [RABBITMQ_USER]    rabbitmq user (default: guest)
         -s, --rmqpass [RABBITMQ_PASS]    rabbitmq pass (default: guest)
         -r, --rmqhost [RABBITMQ_HOST]    rabbitmq host (default: 127.0.0.1)
