@@ -115,6 +115,7 @@ class Dumper
 
     object_totals(overview)
     message_stats(overview)
+    queue_totals(overview)
     system(node)
   end
 
@@ -131,7 +132,7 @@ class Dumper
   def message_stats(overview)
     prefix = "#{@options[:prefix]}.overview.message_stats"
     stats = overview['message_stats']
-    [
+    keys = [
       'publish',
       'publish_in',
       'publish_out',
@@ -143,12 +144,19 @@ class Dumper
       'deliver_get',
       'redeliver',
       'return',
-    ].each do |stat|
-      @graphite.add("#{prefix}.#{stat}.count", stats[stat] || 0)
-      details = "#{stat}_details"
-      rate = (stats[details] ? stats[details]['rate'] : nil) || 0
-      @graphite.add("#{prefix}.#{stat}.rate", rate)
-    end
+    ]
+    extract_details(stats, prefix, keys)
+  end
+
+  def queue_totals(overview)
+    prefix = "#{@options[:prefix]}.overview.queue_totals"
+    stats = overview['queue_totals']
+    keys = [
+      'messages',
+      'messages_ready',
+      'messages_unacknowledged',
+    ]
+    extract_details(stats, prefix, keys)
   end
 
   def queues()
@@ -180,6 +188,18 @@ class Dumper
   end
 
   private
+
+  def extract_details(stats, prefix, keys)
+    keys.each do |stat|
+      count = stats[stat] || 0
+      details = "#{stat}_details"
+      rate = (stats[details] ? stats[details]['rate'] : nil) || 0
+
+      @graphite.add("#{prefix}.#{stat}.count", count)
+      @graphite.add("#{prefix}.#{stat}.rate", rate)
+    end
+  end
+
   def system(node)
     system = @admin.get("nodes/#{node}")
     prefix = "#{@options[:prefix]}.system"
