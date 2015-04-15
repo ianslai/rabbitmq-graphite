@@ -111,16 +111,44 @@ class Dumper
 
   def overview()
     overview = @admin.get("overview")
+    node = overview['node']
+
+    object_totals(overview)
+    message_stats(overview)
+    system(node)
+  end
+
+  def object_totals(overview)
     prefix = "#{@options[:prefix]}.overview.object_totals"
     totals = overview['object_totals']
-    node = overview['node']
     @graphite.add("#{prefix}.channels", totals['channels'])
     @graphite.add("#{prefix}.connections", totals['connections'])
     @graphite.add("#{prefix}.consumers", totals['consumers'])
     @graphite.add("#{prefix}.exchanges", totals['exchanges'])
     @graphite.add("#{prefix}.queues", totals['queues'])
+  end
 
-    system(node)
+  def message_stats(overview)
+    prefix = "#{@options[:prefix]}.overview.message_stats"
+    stats = overview['message_stats']
+    [
+      'publish',
+      'publish_in',
+      'publish_out',
+      'confirm',
+      'deliver',
+      'deliver_noack',
+      'get',
+      'get_noack',
+      'deliver_get',
+      'redeliver',
+      'return',
+    ].each do |stat|
+      @graphite.add("#{prefix}.#{stat}.count", stats[stat] || 0)
+      details = "#{stat}_details"
+      rate = (stats[details] ? stats[details]['rate'] : nil) || 0
+      @graphite.add("#{prefix}.#{stat}.rate", rate)
+    end
   end
 
   def queues()
@@ -174,6 +202,25 @@ class Dumper
       @graphite.add("#{prefix}.#{stat}", system[stat])
     end
   end
+
+  # Wrap each set of stats in a begin/rescue so we can safely skip those with errors
+  # In particular, system stats requires not just "management" permissions, but also
+  # "monitoring" or above.
+  def self.wrap_error_handling(*method_names)
+    method_names.each do |method_name|
+      old_method = instance_method(method_name)
+      define_method(method_name) do |*args|
+        begin
+          old_method.bind(self).call(*args)
+        rescue
+          puts $!, $@
+        end
+      end
+    end
+  end
+
+  wrap_error_handling :overview, :object_totals, :message_stats, :queues, :system
+  wrap_error_handling :send
 end
 
 ################################################################################
