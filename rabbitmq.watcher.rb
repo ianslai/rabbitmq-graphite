@@ -18,7 +18,8 @@ options = {
   :interval => 10,
   :host => '127.0.0.1',
   :port => 2003,
-  :queues => false,
+  :queues => false,                # Whether to report detailed metrics for each queue/exchange
+  :auto_delete_queues => false,    # Whether to include queues that are configured as auto-delete
   :rmquser => 'guest',
   :rmqpass => 'guest',
   :rmqhost => '127.0.0.1',
@@ -43,8 +44,8 @@ OptionParser.new do |opts|
       case key
       when :interval, :port, :rmqport
         value = value.to_i
-      when :queues
-        value = (value.downcase == "true")
+      when :queues, :auto_delete_queues
+        value = (value == true) || (value.to_s.downcase == "true")
       end
 
       options[key] = value
@@ -160,6 +161,7 @@ class Dumper
     queues = @admin.get("queues")
     queues.each do |queue|
       next unless queue.key?('name')
+      next if (queue['auto_delete'] && !@options[:auto_delete_queues])
       prefix = object_prefix("queues", queue['name'])
 
       summary = [
