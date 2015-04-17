@@ -122,11 +122,8 @@ class Dumper
   def object_totals(overview)
     prefix = "#{@options[:prefix]}.overview.object_totals"
     totals = overview['object_totals']
-    @graphite.add("#{prefix}.channels", totals['channels'])
-    @graphite.add("#{prefix}.connections", totals['connections'])
-    @graphite.add("#{prefix}.consumers", totals['consumers'])
-    @graphite.add("#{prefix}.exchanges", totals['exchanges'])
-    @graphite.add("#{prefix}.queues", totals['queues'])
+
+    extract_stats(totals, prefix, ['channels', 'connections', 'consumers', 'exchanges', 'queues'])
   end
 
   def message_stats(overview)
@@ -162,23 +159,40 @@ class Dumper
   def queues()
     queues = @admin.get("queues")
     queues.each do |queue|
-      if queue.key?('name')
-        queue_name = queue['name'].gsub('.', '_')
-        prefix = "#{@options[:prefix]}.queues.#{queue_name}"
-        @graphite.add("#{prefix}.active_consumers", queue['active_consumers'])
-        @graphite.add("#{prefix}.consumers", queue['consumers'])
-        @graphite.add("#{prefix}.memory", queue['memory'])
-        @graphite.add("#{prefix}.messages", queue['messages'])
-        @graphite.add("#{prefix}.messages_ready", queue['messages_ready'])
-        @graphite.add("#{prefix}.messages_unacknowledged", queue['messages_unacknowledged'])
-        @graphite.add("#{prefix}.avg_egress_rate", queue['backing_queue_status']['avg_egress_rate'])   if queue['backing_queue_status']
-        @graphite.add("#{prefix}.avg_ingress_rate", queue['backing_queue_status']['avg_ingress_rate']) if queue['backing_queue_status']
-        if queue.key?('message_stats')
-          @graphite.add("#{prefix}.ack_rate", queue['message_stats']['ack_details']['rate'])                  if queue['message_stats']['ack_details']
-          @graphite.add("#{prefix}.deliver_rate", queue['message_stats']['deliver_details']['rate'])          if queue['message_stats']['deliver_details']
-          @graphite.add("#{prefix}.deliver_get_rate", queue['message_stats']['deliver_get_details']['rate'])  if queue['message_stats']['deliver_get_details']
-          @graphite.add("#{prefix}.publish_rate", queue['message_stats']['publish_details']['rate'])          if queue['message_stats']['publish_details']
-        end
+      next unless queue.key?('name')
+      prefix = object_prefix("queues", queue['name'])
+
+      summary = [
+        'active_consumers',
+        'consumers',
+        'memory',
+        'messages',
+        'messages_ready',
+        'messages_unacknowledged',
+      ]
+      extract_stats(queue, prefix, summary)
+
+      backing_queue_status = queue['backing_queue_status']
+      if backing_queue_status
+        extract_stats(backing_queue_status, prefix, ['avg_egress_rate', 'avg_ingress_rate'])
+      end
+
+      message_stats = queue['message_stats']
+      if message_stats
+        extract_details(message_stats, prefix, ['ack', 'deliver_get', 'deliver', 'publish'])
+      end
+    end
+  end
+
+  def exchanges()
+    exchanges = @admin.get("exchanges")
+    exchanges.each do |exchange|
+      next unless exchange.key?('name')
+      prefix = object_prefix("exchanges", exchange['name'])
+
+      message_stats = exchange['message_stats']
+      if message_stats
+        extract_details(message_stats, prefix, ['confirm', 'publish_in', 'publish_out'])
       end
     end
   end
@@ -188,6 +202,17 @@ class Dumper
   end
 
   private
+
+  def object_prefix(type, name)
+    name = name.empty? ? '_default' : name.gsub('.', '_')
+    "#{@options[:prefix]}.#{type}.#{name}"
+  end
+
+  def extract_stats(stats, prefix, keys)
+    keys.each do |stat|
+      @graphite.add("#{prefix}.#{stat}", stats[stat] || 0)
+    end
+  end
 
   def extract_details(stats, prefix, keys)
     keys.each do |stat|
@@ -204,7 +229,7 @@ class Dumper
     system = @admin.get("nodes/#{node}")
     prefix = "#{@options[:prefix]}.system"
 
-    [
+    keys = [
       'disk_free',
       'disk_free_limit',
       'fd_total',
@@ -218,9 +243,8 @@ class Dumper
       'sockets_total',
       'sockets_used',
       'uptime',
-    ].each do |stat|
-      @graphite.add("#{prefix}.#{stat}", system[stat])
-    end
+    ]
+    extract_stats(system, prefix, keys)
   end
 
   # Wrap each set of stats in a begin/rescue so we can safely skip those with errors
@@ -253,6 +277,7 @@ loop do
     dumper.overview
     if options[:queues]
       dumper.queues
+      dumper.exchanges
     end
     dumper.send
   rescue
